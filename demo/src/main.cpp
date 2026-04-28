@@ -196,13 +196,7 @@
       std::vector<VkPresentModeKHR> present_modes(present_count);
       vkGetPhysicalDeviceSurfacePresentModesKHR(g_vk_state.physical_device, g_vk_state.surface, &present_count, present_modes.data());
 
-      VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
-      for (const auto& mode : present_modes) {
-          if (mode == VK_PRESENT_MODE_MAILBOX_KHR) {
-              present_mode = mode;
-              break;
-          }
-      }
+      VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR; // vsync, stable for demo
 
       // Create swapchain
       uint32_t image_count = capabilities.minImageCount + 1;
@@ -283,6 +277,17 @@
       render_pass_info.pAttachments = &color_attachment;
       render_pass_info.subpassCount = 1;
       render_pass_info.pSubpasses = &subpass;
+
+      // Subpass dependency: ensure color attachment output stage waits for image acquisition
+      VkSubpassDependency dependency = {};
+      dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+      dependency.dstSubpass = 0;
+      dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+      dependency.srcAccessMask = 0;
+      dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+      dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+      render_pass_info.dependencyCount = 1;
+      render_pass_info.pDependencies = &dependency;
 
       if (!vk_check(vkCreateRenderPass(g_vk_state.device, &render_pass_info, nullptr, &g_vk_state.render_pass), "vkCreateRenderPass")) {
           return false;
@@ -430,7 +435,11 @@ int main(){
     // Reduce font size by 2px
     ImGui::GetIO().FontGlobalScale = 0.85f;
 
+#ifndef USE_VULKAN_BACKEND
     ImGui_ImplGlfw_InitForOpenGL(window, true);
+#else
+    ImGui_ImplGlfw_InitForVulkan(window, true);
+#endif
 #ifndef USE_VULKAN_BACKEND
     ImGui_ImplOpenGL3_Init("#version 330");
 #else
@@ -471,11 +480,11 @@ int main(){
     TimelineConfig cfg;
     cfg.min_time = 0.0;
     cfg.max_time = 120.0;
-    cfg.view_min = 300.0;
-    cfg.view_max = 20.0;
+    cfg.view_min = 0.0;
+    cfg.view_max = 60.0;
     cfg.label_width = 180.f;
     cfg.ruler_height = 28.f;
-    cfg.timeline_width = 0.0f;
+    cfg.timeline_width = -1.0f;
 
     Timeline* timeline = nullptr;
     std::vector<TimelineTrack>* tracks = nullptr;
@@ -493,12 +502,12 @@ int main(){
                 { {3,  5.0, 18.0, IM_COL32(120,200,255,255), "Music", false} }});
             tracks->push_back(TimelineTrack{"Effects", 26.f, 20.f, 100.f, false, false, false,
                 { {4, 12.0, 15.0, IM_COL32(140,220,140,255), "Particles", false}, {5, 16.0, 19.0, IM_COL32(200,120,220,255), "Glow", false} }});
-            tracks->push_back(TimelineTrack{"sdskjdk", 26.f, 20.f, 100.f, false, false, false,
-                { {6, 2.0, 2.0, IM_COL32(255,200,100,255), "Fade In", false}, {7, 8.0, 8.0, IM_COL32(100,200,255,255), "Fade Out", false}, {8, 15.0, 15.0, IM_COL32(200,100,255,255), "Peak", false} }});
-            tracks->push_back(TimelineTrack{"qwertyuiop", 26.f, 20.f, 100.f, false, false, false,
-                { {9, 3.0, 3.0, IM_COL32(255,150,150,255), "Effect A", false}, {10, 9.0, 9.0, IM_COL32(150,255,150,255), "Effect B", false} }});
-            tracks->push_back(TimelineTrack{"zxcvbnmasd", 26.f, 20.f, 100.f, false, false, false,
-                { {11, 4.0, 4.0, IM_COL32(150,150,255,255), "Control A", false}, {12, 11.0, 11.0, IM_COL32(255,255,150,255), "Control B", false} }});
+            tracks->push_back(TimelineTrack{"Titles", 26.f, 20.f, 100.f, false, false, false,
+                { {6, 2.0, 5.0, IM_COL32(255,200,100,255), "Fade In", false}, {7, 80.0, 88.0, IM_COL32(100,200,255,255), "Fade Out", false}, {8, 55.0, 60.0, IM_COL32(200,100,255,255), "Peak", false} }});
+            tracks->push_back(TimelineTrack{"Motion", 26.f, 20.f, 100.f, false, false, false,
+                { {9, 3.0, 12.0, IM_COL32(255,150,150,255), "Pan Left", false}, {10, 40.0, 55.0, IM_COL32(150,255,150,255), "Zoom In", false} }});
+            tracks->push_back(TimelineTrack{"Markers", 26.f, 20.f, 100.f, false, false, false,
+                { {11, 30.0, 30.0, IM_COL32(150,150,255,255), "Act 1", false}, {12, 60.0, 60.0, IM_COL32(255,255,150,255), "Act 2", false} }});
             initialized = true;
         }
 
@@ -512,18 +521,23 @@ int main(){
 #endif
         ImGui::NewFrame();
 
-        ImGui::Begin("Timeline Demo");
-        ImGui::TextUnformatted("Zoom: Ctrl/Alt + Wheel. Pan: Wheel or Middle/Right-Drag. Select: Click. Move: Drag. Resize: Drag edges.");
-        
-        // Timeline takes full available height after instructions
+        static TimelineEdit last_edit{};
+        ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize, ImGuiCond_Always);
+        ImGui::SetNextWindowPos({0, 0}, ImGuiCond_Always);
+        ImGui::Begin("Timeline Demo", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGui::TextUnformatted("Zoom: Ctrl/Alt+Wheel  Pan: Wheel or Middle/Right-Drag  Select: Click  Move: Drag  Resize: Drag edges");
+        if (last_edit.changed && (last_edit.moved || last_edit.resized)) {
+            ImGui::SameLine();
+            ImGui::TextColored({1.f, 0.8f, 0.2f, 1.f}, "  item %d  [%.2f, %.2f]",
+                last_edit.item_id, last_edit.new_t0, last_edit.new_t1);
+        }
+        ImGui::Separator();
         TimelineEdit edit{};
         timeline->Frame("##timeline", *tracks, &edit);
-        if (edit.changed){
-            if (edit.moved || edit.resized) {
-                ImGui::Text("Edited item %d (moved:%d resized:%d)", edit.item_id, (int)edit.moved, (int)edit.resized);
-                ImGui::Text("New span: [%.3f, %.3f]", edit.new_t0, edit.new_t1);
-            }
-        }
+        if (edit.changed) last_edit = edit;
         ImGui::End();
 
         ImGui::Render();
