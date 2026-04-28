@@ -1,11 +1,13 @@
 # imgui-timeline
 
+Under development.
+
 imgui-timeline addon with professional track controls, solo/mute, and height adjustment.
 
 ### Quick Start (Ubuntu/Linux)
 ```bash
 ./build_app.sh
-./build/build_OPENGL_Release_ubuntu/bin/imgui_timeline_demo
+./build/build_VULKAN_Release_ubuntu/bin/imgui_timeline_vulkan
 ```
 
 ### Quick Start (macOS 12.2+)
@@ -16,13 +18,10 @@ imgui-timeline addon with professional track controls, solo/mute, and height adj
 
 ### Manual Build
 ```bash
-# Auto-fetch ImGui (or let the script do this)
-git submodule update --init --recursive
-
-# Linux/Ubuntu (OpenGL)
-cmake -S . -B build -DBUILD_DEMO=ON -DUSE_BACKEND=OPENGL
+# Linux/Ubuntu (Vulkan)
+cmake -S . -B build -DBUILD_DEMO=ON -DUSE_BACKEND=VULKAN
 cmake --build build -j
-./build/bin/imgui_timeline_demo
+./build/bin/imgui_timeline_vulkan
 
 # macOS (Metal)
 cmake -S . -B build -DBUILD_DEMO=ON -DUSE_BACKEND=METAL
@@ -44,4 +43,4 @@ ImGuiX::TimelineEdit edit;
 timeline.Frame("##timeline", tracks, &edit);
 ```
 
-**Note**: `libs/imgui/` is auto-fetched by build script.
+**Note**: `libs/imgui/` is auto-fetched by the build script.

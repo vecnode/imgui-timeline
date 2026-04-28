@@ -482,7 +482,7 @@ int main(){
     cfg.max_time = 120.0;
     cfg.view_min = 0.0;
     cfg.view_max = 60.0;
-    cfg.label_width = 180.f;
+    cfg.label_width = 270.f;
     cfg.ruler_height = 28.f;
     cfg.timeline_width = -1.0f;
 
