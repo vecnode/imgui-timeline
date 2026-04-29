@@ -97,7 +97,10 @@ void Timeline::drawRuler(ImDrawList* dl, const ImRect& r, float bottom_boundary)
         float grid_end_y = (bottom_boundary > 0.0f) ? bottom_boundary : r.Max.y;
         dl->AddLine(ImVec2(x, r.Min.y + cfg_.ruler_height), ImVec2(x, grid_end_y), grid_col, cfg_.grid_thickness);
         dl->AddLine(ImVec2(x, r.Min.y), ImVec2(x, r.Min.y + cfg_.ruler_height), grid_col, cfg_.grid_thickness);
-        snprintf(buf, sizeof(buf), "%.3f", t);
+        if (major_step >= 10.0) snprintf(buf, sizeof(buf), "%.0f", t);
+        else if (major_step >= 1.0) snprintf(buf, sizeof(buf), "%.1f", t);
+        else if (major_step >= 0.1) snprintf(buf, sizeof(buf), "%.2f", t);
+        else snprintf(buf, sizeof(buf), "%.3f", t);
         // Check if text would overflow the right edge before drawing
         ImVec2 text_size = ImGui::CalcTextSize(buf);
         float text_x = x + 4;
@@ -127,13 +130,6 @@ void Timeline::TogglePlayPause() {
 void Timeline::SetPlayVelocity(double velocity) {
     // Ensure velocity is always positive and reasonable
     st_.play_velocity = std::max(0.1, std::min(10.0, velocity));
-}
-
-void Timeline::SetTrackHeight(size_t track_index, float height) {
-    // This method will be called from the main application
-    // The actual track height modification happens in the main app
-    (void)track_index;
-    (void)height;
 }
 
 void Timeline::handleZoomPan(const ImRect& timelineRect){
@@ -205,12 +201,8 @@ void Timeline::Frame(const char* label, std::vector<TimelineTrack>& tracks, Time
     // No more fixed height limitation - timeline extends to 100% of parent window
     float full_h = avail.y; // Full available height from parent window
     
-    // Width locking mechanism: use initial parent width once, then lock it forever
-    if (!width_locked_) {
-        locked_width_ = (cfg_.timeline_width > 0.0f) ? cfg_.timeline_width : avail.x;
-        width_locked_ = true;
-    }
-    ImVec2 size(locked_width_, full_h);
+    const float use_width = (cfg_.timeline_width > 0.0f) ? cfg_.timeline_width : avail.x;
+    ImVec2 size(use_width, full_h);
 
     ImGui::BeginChild(label, size, true, ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoScrollbar);
     ImRect rect(ImGui::GetWindowPos(), ImVec2(ImGui::GetWindowPos().x + size.x, ImGui::GetWindowPos().y + size.y));
@@ -270,9 +262,11 @@ void Timeline::Frame(const char* label, std::vector<TimelineTrack>& tracks, Time
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, all_solo ? IM_COL32(255, 255, 0, 255) : IM_COL32(255, 255, 0, 200));
     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
     if (ImGui::Button("S##master_solo", ImVec2(button_size, button_size))) {
-        // Toggle solo for all tracks
+        // Keep solo/mute state coherent for all tracks.
+        const bool enable_solo_for_all = !all_solo;
         for (auto& tr : tracks) {
-            tr.solo = !all_solo;
+            tr.solo = enable_solo_for_all;
+            tr.mute = false;
         }
     }
     if (ImGui::IsItemHovered()) {
@@ -441,20 +435,18 @@ void Timeline::Frame(const char* label, std::vector<TimelineTrack>& tracks, Time
     // Start input (always 0 for now)
     ImGui::Text("Start:");
     ImGui::SameLine();
-    static int start_value = 0;
-    ImGui::InputInt("##start", &start_value, 0, 0, ImGuiInputTextFlags_ReadOnly);
+    ImGui::InputInt("##start", &st_.ui_start_time, 0, 0, ImGuiInputTextFlags_ReadOnly);
     
     ImGui::SameLine(0, 20);
     
     // End input (default 50) - controls timeline zoom
     ImGui::Text("End:");
     ImGui::SameLine();
-    static int end_value = 50;
-    if (ImGui::InputInt("##end", &end_value)) {
+    if (ImGui::InputInt("##end", &st_.ui_end_time)) {
         // Update timeline view when End value changes
-        if (end_value > start_value) {
-            st_.view_min = static_cast<double>(start_value);
-            st_.view_max = static_cast<double>(end_value);
+        if (st_.ui_end_time > st_.ui_start_time) {
+            st_.view_min = static_cast<double>(st_.ui_start_time);
+            st_.view_max = static_cast<double>(st_.ui_end_time);
             enforceViewBounds(); // Ensure view stays within valid range
         }
     }
@@ -544,21 +536,18 @@ void Timeline::Frame(const char* label, std::vector<TimelineTrack>& tracks, Time
     // Handle track selection on click
 
     
-    if (area_hovered && io.MouseClicked[0] && hovered_track >= 0 && hovered_item < 0) {
-        // Clicked on a track but not on an item - select the track
-        if (!io.KeyCtrl) {
-            // Clear previous selection if not holding Ctrl
-            for (auto& tr : tracks) {
-                tr.selected = false;
-            }
+    // Consolidated track selection — not gated on area_hovered because child windows
+    // (sidebar) capture hover, preventing area_hovered from being true there.
+    if (io.MouseClicked[0] && hovered_track >= 0 && hovered_item < 0
+        && area.Contains(io.MousePos)) {
+        auto& clicked = tracks[static_cast<size_t>(hovered_track)];
+        if (io.KeyCtrl) {
+            clicked.selected = !clicked.selected;
+        } else {
+            for (auto& tr : tracks) tr.selected = false;
+            clicked.selected = true;
         }
-        // Toggle selection for clicked track
-        tracks[static_cast<size_t>(hovered_track)].selected = !tracks[static_cast<size_t>(hovered_track)].selected || io.KeyCtrl;
-        selected_track_index_ = tracks[static_cast<size_t>(hovered_track)].selected ? hovered_track : -1;
-        
-
-        
-        // Update edit flags
+        selected_track_index_ = clicked.selected ? hovered_track : -1;
         if (out_edit) {
             out_edit->track_selection_changed = true;
             out_edit->selected_track_index = selected_track_index_;
@@ -597,11 +586,12 @@ void Timeline::Frame(const char* label, std::vector<TimelineTrack>& tracks, Time
     // High-performance mouse click detection with zero latency
     if (hovered_item >= 0 && hovered_track >= 0 && io.MouseClicked[0]){
         auto &it = tracks[static_cast<size_t>(hovered_track)].items[static_cast<size_t>(hovered_item)];
-        bool was = it.selected;
         if (!io.KeyCtrl){
             for (auto &tr: tracks) for (auto &itm: tr.items) itm.selected = false;
+            it.selected = true;
+        } else {
+            it.selected = !it.selected;
         }
-        it.selected = !was || io.KeyCtrl;
         
         // Always select the track when clicking on media items (more efficient)
         if (!io.KeyCtrl) {
@@ -728,7 +718,9 @@ void Timeline::drawTrack(ImDrawList* dl, TimelineTrack& track, const ImRect& are
         // Empty track name - use placeholder styling
         ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150, 150, 150, 255)); // Light grey text
         ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(80, 80, 80, 255)); // Darker background for contrast
-        ImGui::InputText(("##track_name" + std::to_string(track_index)).c_str(), track_name_buffer, sizeof(track_name_buffer), ImGuiInputTextFlags_EnterReturnsTrue);
+        if (ImGui::InputText(("##track_name" + std::to_string(track_index)).c_str(), track_name_buffer, sizeof(track_name_buffer), ImGuiInputTextFlags_EnterReturnsTrue)) {
+            track.name = std::string(track_name_buffer);
+        }
         ImGui::PopStyleColor(2);
     } else {
         // Non-empty track name - use high contrast styling
@@ -755,11 +747,15 @@ void Timeline::drawTrack(ImDrawList* dl, TimelineTrack& track, const ImRect& are
         if (ImGui::Button(("S##solo" + std::to_string(track_index)).c_str(), ImVec2(20, 20))) {
             track.solo = !track.solo;
             if (track.solo) {
-                // Unmute other tracks when soloing this one
+                track.mute = false;
                 for (auto& other_tr : tracks) {
-                    if (&other_tr != &track) {
-                        other_tr.mute = true;
-                    }
+                    if (&other_tr != &track) other_tr.mute = true;
+                }
+            } else {
+                bool any_solo = false;
+                for (const auto& tr : tracks) { if (tr.solo) { any_solo = true; break; } }
+                if (!any_solo) {
+                    for (auto& tr : tracks) tr.mute = false;
                 }
             }
         }
@@ -803,28 +799,20 @@ void Timeline::drawTrack(ImDrawList* dl, TimelineTrack& track, const ImRect& are
             // This button handles the drag area for resizing track height
         }
         
-        // Handle height dragging
-        static bool is_resizing_height = false;
-        static int resizing_track = -1;
-        static float initial_height = 0.0f;
-        static float initial_mouse_y = 0.0f;
-        
+        // Handle height dragging (uses member vars to avoid cross-track static bleed)
         if (ImGui::IsItemHovered() && ImGui::GetIO().MouseDown[0]) {
-            if (!is_resizing_height) {
-                is_resizing_height = true;
-                resizing_track = track_index;
-                initial_height = track.height;
-                initial_mouse_y = ImGui::GetIO().MousePos.y;
+            if (height_resize_track_ < 0) {
+                height_resize_track_ = track_index;
+                height_resize_initial_ = track.height;
+                height_resize_mouse_y_ = ImGui::GetIO().MousePos.y;
             }
         }
-        
-        if (is_resizing_height && resizing_track == track_index && ImGui::GetIO().MouseDown[0]) {
-            float delta_y = ImGui::GetIO().MousePos.y - initial_mouse_y;
-            float new_height = initial_height + delta_y;
-            track.height = std::max(track.min_height, std::min(track.max_height, new_height));
+
+        if (height_resize_track_ == track_index && ImGui::GetIO().MouseDown[0]) {
+            float delta_y = ImGui::GetIO().MousePos.y - height_resize_mouse_y_;
+            track.height = std::max(track.min_height, std::min(track.max_height, height_resize_initial_ + delta_y));
         } else if (!ImGui::GetIO().MouseDown[0]) {
-            is_resizing_height = false;
-            resizing_track = -1;
+            height_resize_track_ = -1;
         }
     
     // Subtle separator line
@@ -862,51 +850,19 @@ void Timeline::drawTrack(ImDrawList* dl, TimelineTrack& track, const ImRect& are
         }
     }
     
-    // Set hovered_track for the entire track area (not just media items)
-    if (area_hovered) {
+    // Set hovered_track for the full row (including sidebar child windows — no area_hovered gate)
+    {
         const ImVec2& mp = ImGui::GetIO().MousePos;
         if (mp.x >= area.Min.x && mp.x <= area.Max.x && mp.y >= y && mp.y <= y + row_h) {
             hovered_track = track_index;
-            
-            // Handle track selection when clicking on track area
-            if (ImGui::GetIO().MouseClicked[0]) {
-                // Clear previous track selection if not holding Ctrl
-                if (!ImGui::GetIO().KeyCtrl) {
-                    for (auto& tr : tracks) {
-                        tr.selected = false;
-                    }
-                }
-                track.selected = true;
-                selected_track_index_ = track_index;
-            }
         }
-    }
-    
-    // Additional track selection for the left sidebar area (S/M buttons, text input, etc.)
-    if (area_hovered) {
-        const ImVec2& mp = ImGui::GetIO().MousePos;
-        // Check if mouse is in the left sidebar area (where the controls are)
-        if (mp.x >= area.Min.x && mp.x <= area.Min.x + cfg_.label_width && mp.y >= y && mp.y <= y + row_h) {
-            // Handle track selection when clicking in the sidebar area
-            if (ImGui::GetIO().MouseClicked[0]) {
-                // Clear previous track selection if not holding Ctrl
-                if (!ImGui::GetIO().KeyCtrl) {
-                    for (auto& tr : tracks) {
-                        tr.selected = false;
-                    }
-                }
-                track.selected = true;
-                selected_track_index_ = track_index;
-            }
-        }
-    }
-    
-    // Draw selection highlight LAST so it appears on top of everything
-    if (track.selected) {
-        const ImU32 selection_bg = IM_COL32(255, 0, 0, 50); // Light red with low opacity
-        dl->AddRectFilled(row_rect.Min, row_rect.Max, selection_bg, 0.0f);
     }
 
+    // Draw selection highlight LAST so it appears on top of everything
+    if (track.selected) {
+        const ImU32 selection_bg = IM_COL32(255, 0, 0, 50);
+        dl->AddRectFilled(row_rect.Min, row_rect.Max, selection_bg, 0.0f);
+    }
 }
 
 
@@ -915,65 +871,43 @@ void Timeline::ShowDeleteTrackModal(const std::string& track_name, int track_ind
     track_to_delete_name_ = track_name;
     track_to_delete_index_ = track_index;
     show_delete_modal_ = true;
+    // OpenPopup is deferred to renderDeleteTrackModal (must be called in correct window context)
 }
 
 void Timeline::renderDeleteTrackModal(std::vector<TimelineTrack>& tracks) {
     if (!show_delete_modal_) return;
-    
-    // Center the modal on screen
-    ImVec2 display_size = ImGui::GetIO().DisplaySize;
-    ImGui::SetNextWindowPos(ImVec2(display_size.x * 0.5f, display_size.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    
-    // Use regular popup instead of modal to avoid context issues
-    if (ImGui::Begin("Delete Track", &show_delete_modal_, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse)) {
-        ImGui::Text("Do you really want to delete track \"%s\"?", track_to_delete_name_.c_str());
+    ImGui::OpenPopup("Delete Track##modal");
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("Delete Track##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Delete track \"%s\"?", track_to_delete_name_.c_str());
         ImGui::Spacing();
-        
-        // Center the buttons
-        float button_width = 80.0f;
-        float total_width = button_width * 2 + 20.0f; // 2 buttons + spacing
-        ImGui::SetCursorPosX((ImGui::GetWindowSize().x - total_width) * 0.5f);
-        
-        if (ImGui::Button("Yes", ImVec2(button_width, 0))) {
-            // Delete the track using the stored index
+        if (ImGui::Button("Yes", ImVec2(80, 0))) {
             if (track_to_delete_index_ >= 0 && track_to_delete_index_ < static_cast<int>(tracks.size())) {
-                // Remove the track from the vector
                 tracks.erase(tracks.begin() + track_to_delete_index_);
-                
-                // Reset selection state
                 selected_track_index_ = -1;
-                
-                // Close modal after deletion
-                show_delete_modal_ = false;
             }
-        }
-        
-        ImGui::SameLine();
-        
-        if (ImGui::Button("No", ImVec2(button_width, 0))) {
             show_delete_modal_ = false;
+            ImGui::CloseCurrentPopup();
         }
-        
-        ImGui::End();
+        ImGui::SameLine();
+        if (ImGui::Button("No", ImVec2(80, 0))) {
+            show_delete_modal_ = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
 }
 
 
 
 std::string Timeline::generateUniqueTrackName(const std::vector<TimelineTrack>& tracks) {
-    // Generate a random 10-character name
-    const std::string chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    int counter = static_cast<int>(tracks.size()) + 1;
     std::string name;
-    
-    // Keep generating names until we find a unique one
     do {
-        name.clear();
-        for (int i = 0; i < 10; ++i) {
-            name += chars[static_cast<size_t>(rand()) % chars.length()];
-        }
-    } while (std::any_of(tracks.begin(), tracks.end(), 
-                         [&name](const TimelineTrack& track) { return track.name == name; }));
-    
+        name = "Track " + std::to_string(counter++);
+    } while (std::any_of(tracks.begin(), tracks.end(),
+                         [&name](const TimelineTrack& t){ return t.name == name; }));
     return name;
 }
 

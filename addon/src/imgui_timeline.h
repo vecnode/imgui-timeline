@@ -82,12 +82,11 @@ public:
     bool   IsPlaying() const { return st_.is_playing; }
     void   SetPlayVelocity(double velocity); // Added: Set playback speed (1x, 2x, 5x)
     double GetPlayVelocity() const { return st_.play_velocity; } // Added: Get current velocity
-    double GetCurrentTime() const { return current_time_; }
-    double GetViewMin() const { return view_min_; }
-    double GetViewMax() const { return view_max_; }
+    double GetCurrentTime() const { return st_.current_time; }
+    double GetViewMin() const { return st_.view_min; }
+    double GetViewMax() const { return st_.view_max; }
     float  TimeToPixels(double t, float x0, float x1) const;
     double PixelsToTime(float x, float x0, float x1) const;
-    void   SetTrackHeight(size_t track_index, float height);
     void   ShowDeleteTrackModal(const std::string& track_name, int track_index);
 
 private:
@@ -95,6 +94,8 @@ private:
         double view_min = 0.0;
         double view_max = 10.0;
         double current_time = 0.0;
+        int    ui_start_time = 0;
+        int    ui_end_time = 50;
         bool   is_panning = false;
         ImVec2 pan_anchor_px = {0,0};
         double pan_anchor_t  = 0.0;
@@ -111,17 +112,13 @@ private:
     int      drag_item_idx_ = -1;
     double   drag_item_t0_ = 0.0, drag_item_t1_ = 0.0;
     
-    // Additional member variables for getter methods
-    double current_time_ = 0.0;
-    double view_min_ = 0.0;
-    double view_max_ = 10.0;
-    
-    // Width locking mechanism
-    float locked_width_ = 300.0f; // minimum width
-    bool width_locked_ = false;
-    
     // Track selection state
     int selected_track_index_ = -1;
+
+    // Track height resize drag state (member to avoid static-local hazards)
+    int   height_resize_track_ = -1;
+    float height_resize_initial_ = 0.0f;
+    float height_resize_mouse_y_ = 0.0f;
     
     // Modal state
     bool show_delete_modal_ = false;
