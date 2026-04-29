@@ -56,6 +56,19 @@
       }
   }
 
+  static bool wait_for_nonzero_framebuffer(GLFWwindow* window) {
+      int w = 0, h = 0;
+      glfwGetFramebufferSize(window, &w, &h);
+      while (w == 0 || h == 0) {
+          if (glfwWindowShouldClose(window)) {
+              return false;
+          }
+          glfwWaitEvents();
+          glfwGetFramebufferSize(window, &w, &h);
+      }
+      return true;
+  }
+
   // Simplified Vulkan initialization
   static bool init_vulkan_core(int width, int height) {
       // Load Vulkan functions
@@ -159,9 +172,36 @@
   }
 
   static bool init_vulkan_swapchain(GLFWwindow* window) {
-      // Create surface from GLFW window
-      if (!vk_check((VkResult)glfwCreateWindowSurface(g_vk_state.instance, window, nullptr, &g_vk_state.surface), "glfwCreateWindowSurface")) {
-          return false;
+      // Create surface from GLFW window once.
+      if (g_vk_state.surface == VK_NULL_HANDLE) {
+          if (!vk_check((VkResult)glfwCreateWindowSurface(g_vk_state.instance, window, nullptr, &g_vk_state.surface), "glfwCreateWindowSurface")) {
+              return false;
+          }
+      }
+
+      // Recreate swapchain-dependent resources when called again (e.g. window resize).
+      if (!g_vk_state.cmd_buffers.empty()) {
+          vkFreeCommandBuffers(g_vk_state.device, g_vk_state.cmd_pool,
+                               static_cast<uint32_t>(g_vk_state.cmd_buffers.size()),
+                               g_vk_state.cmd_buffers.data());
+          g_vk_state.cmd_buffers.clear();
+      }
+      for (auto fb : g_vk_state.framebuffers) {
+          vkDestroyFramebuffer(g_vk_state.device, fb, nullptr);
+      }
+      g_vk_state.framebuffers.clear();
+      if (g_vk_state.render_pass != VK_NULL_HANDLE) {
+          vkDestroyRenderPass(g_vk_state.device, g_vk_state.render_pass, nullptr);
+          g_vk_state.render_pass = VK_NULL_HANDLE;
+      }
+      for (auto view : g_vk_state.swapchain_image_views) {
+          vkDestroyImageView(g_vk_state.device, view, nullptr);
+      }
+      g_vk_state.swapchain_image_views.clear();
+      g_vk_state.swapchain_images.clear();
+      if (g_vk_state.swapchain != VK_NULL_HANDLE) {
+          vkDestroySwapchainKHR(g_vk_state.device, g_vk_state.swapchain, nullptr);
+          g_vk_state.swapchain = VK_NULL_HANDLE;
       }
 
       // Get surface capabilities
@@ -170,8 +210,13 @@
 
       g_vk_state.swapchain_extent = capabilities.currentExtent;
       if (g_vk_state.swapchain_extent.width == 0xFFFFFFFF) {
-          g_vk_state.swapchain_extent.width = 1280;
-          g_vk_state.swapchain_extent.height = 720;
+          int fb_w = 0, fb_h = 0;
+          glfwGetFramebufferSize(window, &fb_w, &fb_h);
+          if (fb_w <= 0 || fb_h <= 0) {
+              return false;
+          }
+          g_vk_state.swapchain_extent.width = static_cast<uint32_t>(fb_w);
+          g_vk_state.swapchain_extent.height = static_cast<uint32_t>(fb_h);
       }
 
       // Get surface formats
@@ -311,47 +356,57 @@
           }
       }
 
-      // Create synchronization primitives and command buffers
-      // Create descriptor pool for ImGui
-      VkDescriptorPoolSize pool_sizes[] = {
-          {VK_DESCRIPTOR_TYPE_SAMPLER, 1000},
-          {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000},
-          {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1000},
-          {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1000},
-          {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1000},
-          {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1000},
-          {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1000},
-          {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000},
-      };
+      // Create descriptor pool and frame sync objects once.
+      if (g_vk_state.descriptor_pool == VK_NULL_HANDLE) {
+          VkDescriptorPoolSize pool_sizes[] = {
+              {VK_DESCRIPTOR_TYPE_SAMPLER, 1000},
+              {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000},
+              {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1000},
+              {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1000},
+              {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1000},
+              {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1000},
+              {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1000},
+              {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000},
+          };
 
-      VkDescriptorPoolCreateInfo pool_create_info = {};
-      pool_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-      pool_create_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-      pool_create_info.maxSets = 1000;
-      pool_create_info.poolSizeCount = sizeof(pool_sizes) / sizeof(pool_sizes[0]);
-      pool_create_info.pPoolSizes = pool_sizes;
+          VkDescriptorPoolCreateInfo pool_create_info = {};
+          pool_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+          pool_create_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+          pool_create_info.maxSets = 1000;
+          pool_create_info.poolSizeCount = sizeof(pool_sizes) / sizeof(pool_sizes[0]);
+          pool_create_info.pPoolSizes = pool_sizes;
 
-      if (!vk_check(vkCreateDescriptorPool(g_vk_state.device, &pool_create_info, nullptr, &g_vk_state.descriptor_pool), "vkCreateDescriptorPool")) {
-          return false;
+          if (!vk_check(vkCreateDescriptorPool(g_vk_state.device, &pool_create_info, nullptr, &g_vk_state.descriptor_pool), "vkCreateDescriptorPool")) {
+              return false;
+          }
       }
 
-      g_vk_state.image_acquired_semaphores.resize(2);
-      g_vk_state.render_complete_semaphores.resize(2);
-      g_vk_state.in_flight_fences.resize(2);
+      if (g_vk_state.image_acquired_semaphores.empty()) {
+          g_vk_state.image_acquired_semaphores.resize(2);
+          g_vk_state.render_complete_semaphores.resize(2);
+          g_vk_state.in_flight_fences.resize(2);
+
+          VkSemaphoreCreateInfo semaphore_info = {};
+          semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+          VkFenceCreateInfo fence_info = {};
+          fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+          fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+          for (size_t i = 0; i < 2; i++) {
+              if (!vk_check(vkCreateSemaphore(g_vk_state.device, &semaphore_info, nullptr, &g_vk_state.image_acquired_semaphores[i]), "vkCreateSemaphore(image_acquired)")) {
+                  return false;
+              }
+              if (!vk_check(vkCreateSemaphore(g_vk_state.device, &semaphore_info, nullptr, &g_vk_state.render_complete_semaphores[i]), "vkCreateSemaphore(render_complete)")) {
+                  return false;
+              }
+              if (!vk_check(vkCreateFence(g_vk_state.device, &fence_info, nullptr, &g_vk_state.in_flight_fences[i]), "vkCreateFence")) {
+                  return false;
+              }
+          }
+      }
+
       g_vk_state.cmd_buffers.resize(image_count);
-
-      VkSemaphoreCreateInfo semaphore_info = {};
-      semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-
-      VkFenceCreateInfo fence_info = {};
-      fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-      fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-
-      for (size_t i = 0; i < 2; i++) {
-          vkCreateSemaphore(g_vk_state.device, &semaphore_info, nullptr, &g_vk_state.image_acquired_semaphores[i]);
-          vkCreateSemaphore(g_vk_state.device, &semaphore_info, nullptr, &g_vk_state.render_complete_semaphores[i]);
-          vkCreateFence(g_vk_state.device, &fence_info, nullptr, &g_vk_state.in_flight_fences[i]);
-      }
 
       VkCommandBufferAllocateInfo cmd_buffer_info = {};
       cmd_buffer_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -366,14 +421,41 @@
       return true;
   }
 
+  static bool recreate_vulkan_swapchain(GLFWwindow* window) {
+      if (!wait_for_nonzero_framebuffer(window)) {
+          return false;
+      }
+      vkDeviceWaitIdle(g_vk_state.device);
+      if (!init_vulkan_swapchain(window)) {
+          return false;
+      }
+      ImGui_ImplVulkan_SetMinImageCount(static_cast<uint32_t>(g_vk_state.swapchain_images.size()));
+      ImGui_ImplVulkan_PipelineInfo pipeline_info = {};
+      pipeline_info.RenderPass = g_vk_state.render_pass;
+      ImGui_ImplVulkan_CreateMainPipeline(&pipeline_info);
+      g_vk_state.current_frame = 0;
+      return true;
+  }
+
   static void cleanup_vulkan() {
       if (g_vk_state.device == VK_NULL_HANDLE) return;
 
       vkDeviceWaitIdle(g_vk_state.device);
 
-      for (size_t i = 0; i < 2; i++) {
+      if (!g_vk_state.cmd_buffers.empty()) {
+          vkFreeCommandBuffers(g_vk_state.device, g_vk_state.cmd_pool,
+                               static_cast<uint32_t>(g_vk_state.cmd_buffers.size()),
+                               g_vk_state.cmd_buffers.data());
+          g_vk_state.cmd_buffers.clear();
+      }
+
+      for (size_t i = 0; i < g_vk_state.image_acquired_semaphores.size(); i++) {
           vkDestroySemaphore(g_vk_state.device, g_vk_state.image_acquired_semaphores[i], nullptr);
+      }
+      for (size_t i = 0; i < g_vk_state.render_complete_semaphores.size(); i++) {
           vkDestroySemaphore(g_vk_state.device, g_vk_state.render_complete_semaphores[i], nullptr);
+      }
+      for (size_t i = 0; i < g_vk_state.in_flight_fences.size(); i++) {
           vkDestroyFence(g_vk_state.device, g_vk_state.in_flight_fences[i], nullptr);
       }
 
@@ -381,15 +463,23 @@
           vkDestroyFramebuffer(g_vk_state.device, fb, nullptr);
       }
 
-      vkDestroyRenderPass(g_vk_state.device, g_vk_state.render_pass, nullptr);
+      if (g_vk_state.render_pass != VK_NULL_HANDLE) {
+          vkDestroyRenderPass(g_vk_state.device, g_vk_state.render_pass, nullptr);
+      }
 
       for (auto view : g_vk_state.swapchain_image_views) {
           vkDestroyImageView(g_vk_state.device, view, nullptr);
       }
 
-      vkDestroySwapchainKHR(g_vk_state.device, g_vk_state.swapchain, nullptr);
-      vkDestroySurfaceKHR(g_vk_state.instance, g_vk_state.surface, nullptr);
-      vkDestroyDescriptorPool(g_vk_state.device, g_vk_state.descriptor_pool, nullptr);
+      if (g_vk_state.swapchain != VK_NULL_HANDLE) {
+          vkDestroySwapchainKHR(g_vk_state.device, g_vk_state.swapchain, nullptr);
+      }
+      if (g_vk_state.surface != VK_NULL_HANDLE) {
+          vkDestroySurfaceKHR(g_vk_state.instance, g_vk_state.surface, nullptr);
+      }
+      if (g_vk_state.descriptor_pool != VK_NULL_HANDLE) {
+          vkDestroyDescriptorPool(g_vk_state.device, g_vk_state.descriptor_pool, nullptr);
+      }
       vkDestroyCommandPool(g_vk_state.device, g_vk_state.cmd_pool, nullptr);
       vkDestroyDevice(g_vk_state.device, nullptr);
       vkDestroyInstance(g_vk_state.instance, nullptr);
@@ -554,7 +644,19 @@ int main(){
         VkResult res = vkAcquireNextImageKHR(g_vk_state.device, g_vk_state.swapchain, UINT64_MAX,
                                                g_vk_state.image_acquired_semaphores[g_vk_state.current_frame],
                                                VK_NULL_HANDLE, &img_idx);
-        if (res != VK_SUCCESS) continue;
+        if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR) {
+            if (!recreate_vulkan_swapchain(window)) {
+                if (!glfwWindowShouldClose(window)) {
+                    std::fprintf(stderr, "Failed to recreate Vulkan swapchain after acquire\n");
+                }
+                break;
+            }
+            continue;
+        }
+        if (res != VK_SUCCESS) {
+            std::fprintf(stderr, "vkAcquireNextImageKHR failed: %d\n", (int)res);
+            break;
+        }
 
         vkWaitForFences(g_vk_state.device, 1, &g_vk_state.in_flight_fences[g_vk_state.current_frame], VK_TRUE, UINT64_MAX);
         vkResetFences(g_vk_state.device, 1, &g_vk_state.in_flight_fences[g_vk_state.current_frame]);
@@ -593,7 +695,11 @@ int main(){
         submit_info.signalSemaphoreCount = 1;
         submit_info.pSignalSemaphores = &g_vk_state.render_complete_semaphores[g_vk_state.current_frame];
 
-        vkQueueSubmit(g_vk_state.queue, 1, &submit_info, g_vk_state.in_flight_fences[g_vk_state.current_frame]);
+        VkResult submit_res = vkQueueSubmit(g_vk_state.queue, 1, &submit_info, g_vk_state.in_flight_fences[g_vk_state.current_frame]);
+        if (submit_res != VK_SUCCESS) {
+            std::fprintf(stderr, "vkQueueSubmit failed: %d\n", (int)submit_res);
+            break;
+        }
 
         VkPresentInfoKHR present_info = {};
         present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -603,7 +709,20 @@ int main(){
         present_info.pSwapchains = &g_vk_state.swapchain;
         present_info.pImageIndices = &img_idx;
 
-        vkQueuePresentKHR(g_vk_state.queue, &present_info);
+        VkResult present_res = vkQueuePresentKHR(g_vk_state.queue, &present_info);
+        if (present_res == VK_ERROR_OUT_OF_DATE_KHR || present_res == VK_SUBOPTIMAL_KHR) {
+            if (!recreate_vulkan_swapchain(window)) {
+                if (!glfwWindowShouldClose(window)) {
+                    std::fprintf(stderr, "Failed to recreate Vulkan swapchain after present\n");
+                }
+                break;
+            }
+            continue;
+        }
+        if (present_res != VK_SUCCESS) {
+            std::fprintf(stderr, "vkQueuePresentKHR failed: %d\n", (int)present_res);
+            break;
+        }
 
         g_vk_state.current_frame = (g_vk_state.current_frame + 1) % 2;
 #endif

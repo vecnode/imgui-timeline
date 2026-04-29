@@ -383,24 +383,10 @@ void Timeline::Frame(const char* label, std::vector<TimelineTrack>& tracks, Time
     
     ImGui::SetCursorScreenPos(rulerRect.Min);
     ImGui::InvisibleButton("##ruler", rulerRect.GetSize());
-    
-    // Mouse-following shadow line in ruler area
-    if (ImGui::IsItemHovered()) {
-        const ImVec2& mouse_pos = io.MousePos;
-        if (mouse_pos.x >= rect.Min.x + cfg_.label_width && mouse_pos.x <= rect.Max.x) {
-            // Draw a very light grey vertical line that follows the mouse in ruler
-            const ImU32 shadow_color = IM_COL32(128, 128, 128, 80); // More visible light grey
-            dl->AddLine(
-                ImVec2(mouse_pos.x, controls_and_ruler_y), 
-                ImVec2(mouse_pos.x, rect.Max.y), 
-                shadow_color, 
-                1.0f
-            );
-        }
-    }
+    const bool ruler_hovered = ImGui::IsItemHovered();
     
     // Bulletproof fast ruler click to set current time
-    if (ImGui::IsItemHovered() && io.MouseDown[0]){
+    if (ruler_hovered && io.MouseDown[0]){
         // Ultra-fast pixel-to-time conversion using pre-computed factors
         const float x0 = rect.Min.x + cfg_.label_width;
         const float x1 = rect.Max.x;
@@ -464,6 +450,18 @@ void Timeline::Frame(const char* label, std::vector<TimelineTrack>& tracks, Time
     ImGui::SetCursorScreenPos(area.Min);
     ImGui::InvisibleButton("##area", area.GetSize(), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
     const bool area_hovered = ImGui::IsItemHovered();
+
+    // Unified mouse-follow shadow line for ruler + tracks.
+    // Using IsMouseHoveringRect keeps it responsive even when child windows are hovered.
+    const bool over_track_rect = ImGui::IsMouseHoveringRect(area.Min, area.Max, false);
+    const bool draw_shadow_line = ruler_hovered || over_track_rect;
+    const float shadow_x_min = rect.Min.x + cfg_.label_width;
+    const float shadow_x_max = rect.Max.x;
+    if (draw_shadow_line && io.MousePos.x >= shadow_x_min && io.MousePos.x <= shadow_x_max) {
+        const ImU32 shadow_color = IM_COL32(128, 128, 128, 80);
+        const float shadow_x = IM_TRUNC(io.MousePos.x) + 0.5f;
+        dl->AddLine(ImVec2(shadow_x, controls_and_ruler_y), ImVec2(shadow_x, area.Max.y), shadow_color, 1.0f);
+    }
 
     // Draw only right border for the content area (ruler + tracks) below the top bar
     const ImU32 border_color = IM_COL32(100, 100, 100, 255); // Grey border
@@ -555,32 +553,16 @@ void Timeline::Frame(const char* label, std::vector<TimelineTrack>& tracks, Time
         }
     }
     
-    // Mouse-following shadow line - appears when hovering over tracks area
-    if (area_hovered) {
-        const ImVec2& mouse_pos = io.MousePos;
-        if (mouse_pos.x >= x0 && mouse_pos.x <= x1 && mouse_pos.y >= area.Min.y && mouse_pos.y <= area.Max.y) {
-            // Draw a very light grey vertical line that follows the mouse
-            const ImU32 shadow_color = IM_COL32(128, 128, 128, 80); // More visible light grey
-            dl->AddLine(
-                ImVec2(mouse_pos.x, area.Min.y), 
-                ImVec2(mouse_pos.x, area.Max.y), 
-                shadow_color, 
-                1.0f
-            );
-        }
-    }
-    
     // Enhanced red line positioning: allow click-and-drag following on tracks
-    static bool is_tracking_mouse = false;
     if (area_hovered && io.MouseDown[0] && drag_mode_ == DragMode::None){
-        if (!is_tracking_mouse) {
-            is_tracking_mouse = true;
+        if (!st_.is_tracking_mouse) {
+            st_.is_tracking_mouse = true;
         }
         // Real-time red line following during drag - works on ALL track areas
         double t = st_.view_min + (io.MousePos.x - x0) / time_to_pixel_factor;
         SetCurrentTime(t);
     } else if (!io.MouseDown[0]) {
-        is_tracking_mouse = false;
+        st_.is_tracking_mouse = false;
     }
 
     // High-performance mouse click detection with zero latency
@@ -745,18 +727,22 @@ void Timeline::drawTrack(ImDrawList* dl, TimelineTrack& track, const ImRect& are
     ImGui::PushStyleColor(ImGuiCol_Text, track.solo ? IM_COL32(0, 0, 0, 255) : ImGui::GetColorU32(ImGuiCol_Text));
     
         if (ImGui::Button(("S##solo" + std::to_string(track_index)).c_str(), ImVec2(20, 20))) {
-            track.solo = !track.solo;
-            if (track.solo) {
-                track.mute = false;
-                for (auto& other_tr : tracks) {
-                    if (&other_tr != &track) other_tr.mute = true;
+            const bool enable_this = !track.solo;
+            if (enable_this) {
+                // Exclusive solo: only this track stays solo/unmuted.
+                for (auto& tr : tracks) {
+                    if (&tr == &track) {
+                        tr.solo = true;
+                        tr.mute = false;
+                    } else {
+                        tr.solo = false;
+                        tr.mute = true;
+                    }
                 }
             } else {
-                bool any_solo = false;
-                for (const auto& tr : tracks) { if (tr.solo) { any_solo = true; break; } }
-                if (!any_solo) {
-                    for (auto& tr : tracks) tr.mute = false;
-                }
+                // Clearing the last solo restores normal unmuted state.
+                track.solo = false;
+                for (auto& tr : tracks) tr.mute = false;
             }
         }
         ImGui::PopStyleColor(4);

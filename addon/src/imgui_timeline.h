@@ -96,6 +96,7 @@ private:
         double current_time = 0.0;
         int    ui_start_time = 0;
         int    ui_end_time = 50;
+        bool   is_tracking_mouse = false;
         bool   is_panning = false;
         ImVec2 pan_anchor_px = {0,0};
         double pan_anchor_t  = 0.0;
